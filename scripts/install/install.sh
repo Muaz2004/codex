@@ -577,6 +577,10 @@ pick_profile() {
   # Use the same shell-specific split Homebrew documents because there is no
   # universal startup file across macOS/Linux login and interactive shells.
   case "$os:${SHELL:-}" in
+    *:*/fish | *:fish)
+      fish_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
+      printf '%s\n' "$fish_config_dir/conf.d/codex.fish"
+      ;;
     darwin:*/zsh)
       printf '%s\n' "$HOME/.zprofile"
       ;;
@@ -611,7 +615,20 @@ add_to_path() {
   path_profile="$profile"
   begin_marker="# >>> Codex installer >>>"
   end_marker="# <<< Codex installer <<<"
-  path_line="export PATH=\"$BIN_DIR:\$PATH\""
+  case "$profile" in
+    *.fish)
+      path_line="fish_add_path \"$BIN_DIR\""
+      ;;
+    *)
+      path_line="export PATH=\"$BIN_DIR:\$PATH\""
+      ;;
+  esac
+
+  case "$profile" in
+    */*)
+      mkdir -p "${profile%/*}"
+      ;;
+  esac
 
   if [ -f "$profile" ] && grep -F "$begin_marker" "$profile" >/dev/null 2>&1; then
     if grep -F "$path_line" "$profile" >/dev/null 2>&1; then
@@ -1038,19 +1055,28 @@ prompt_yes_no() {
 }
 
 print_launch_instructions() {
+  case "$path_profile" in
+    *.fish)
+      current_terminal_cmd="fish_add_path \"$BIN_DIR\" && codex"
+      ;;
+    *)
+      current_terminal_cmd="export PATH=\"$BIN_DIR:\$PATH\" && codex"
+      ;;
+  esac
+
   case "$path_action" in
     added)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
+      step "Current terminal: $current_terminal_cmd"
       step "Future terminals: open a new terminal and run: codex"
       step "PATH was added to $path_profile"
       ;;
     updated)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
+      step "Current terminal: $current_terminal_cmd"
       step "Future terminals: open a new terminal and run: codex"
       step "PATH was updated in $path_profile"
       ;;
     configured)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
+      step "Current terminal: $current_terminal_cmd"
       step "Future terminals: open a new terminal and run: codex"
       step "PATH is already configured in $path_profile"
       ;;

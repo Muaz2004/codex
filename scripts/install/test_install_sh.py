@@ -994,6 +994,287 @@ class InstallShTest(unittest.TestCase):
             )
             self.assertNotIn("Downloading Codex CLI", second_result.stdout)
 
+    def test_fish_detection_and_config_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata = create_package_release(root)
+            result, _ = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata,
+                archive_path=archive,
+                checksum_path=checksum,
+                force_macos=True,
+                shell="/usr/bin/fish",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            home = root / "home"
+            fish_conf = home / ".config" / "fish" / "conf.d" / "codex.fish"
+            profile = home / ".profile"
+            self.assertTrue(fish_conf.exists())
+            self.assertFalse(profile.exists())
+            self.assertIn(f"PATH was added to {fish_conf}", result.stdout)
+            self.assertIn(
+                f'Current terminal: fish_add_path "{root / "install-bin"}" && codex',
+                result.stdout,
+            )
+            self.assertIn(
+                "Future terminals: open a new terminal and run: codex",
+                result.stdout,
+            )
+
+    def test_fish_bare_shell_name_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata = create_package_release(root)
+            result, _ = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata,
+                archive_path=archive,
+                checksum_path=checksum,
+                force_macos=True,
+                shell="fish",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            fish_conf = root / "home" / ".config" / "fish" / "conf.d" / "codex.fish"
+            self.assertTrue(fish_conf.exists())
+
+    def test_fish_path_configuration_syntax(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata = create_package_release(root)
+            result, _ = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata,
+                archive_path=archive,
+                checksum_path=checksum,
+                force_macos=True,
+                shell="/usr/bin/fish",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            fish_conf = root / "home" / ".config" / "fish" / "conf.d" / "codex.fish"
+            install_bin = root / "install-bin"
+            expected_block = textwrap.dedent(
+                f"""
+                # >>> Codex installer >>>
+                fish_add_path "{install_bin}"
+                # <<< Codex installer <<<
+                """
+            ).lstrip()
+            self.assertEqual(fish_conf.read_text(), f"\n{expected_block}")
+
+    def test_fresh_fish_shell_discovers_codex(self) -> None:
+        fish_bin = find_fish_binary()
+        if not fish_bin:
+            self.skipTest(
+                "Fish shell binary not found on host; install fish to execute this integration test"
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata = create_package_release(root)
+            result, _ = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata,
+                archive_path=archive,
+                checksum_path=checksum,
+                force_macos=True,
+                shell=fish_bin,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            install_bin = root / "install-bin"
+
+            env = {
+                "HOME": str(root / "home"),
+                "PATH": "/usr/bin:/bin",
+            }
+            fish_run = subprocess.run(
+                [fish_bin, "-c", "command -v codex && codex --version"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(fish_run.returncode, 0, fish_run.stderr)
+            self.assertIn(str(install_bin / "codex"), fish_run.stdout)
+            self.assertIn(f"codex-cli {VERSION}", fish_run.stdout)
+
+    def test_fish_repeated_execution_does_not_duplicate_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata = create_package_release(root)
+            options = dict(
+                metadata_json=metadata,
+                archive_path=archive,
+                checksum_path=checksum,
+                force_macos=True,
+                shell="/usr/bin/fish",
+            )
+            first_result, _ = run_installer_in(root, VERSION, **options)
+            self.assertEqual(first_result.returncode, 0, first_result.stderr)
+            self.assertIn("PATH was added to", first_result.stdout)
+
+            fish_conf = root / "home" / ".config" / "fish" / "conf.d" / "codex.fish"
+            content_after_first = fish_conf.read_text()
+            self.assertEqual(content_after_first.count("# >>> Codex installer >>>"), 1)
+
+            second_result, _ = run_installer_in(root, VERSION, **options)
+            self.assertEqual(second_result.returncode, 0, second_result.stderr)
+            self.assertIn("PATH is already configured in", second_result.stdout)
+            self.assertEqual(fish_conf.read_text(), content_after_first)
+            self.assertEqual(fish_conf.read_text().count("# >>> Codex installer >>>"), 1)
+
+    def test_fish_updates_existing_installer_managed_block(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata = create_package_release(root)
+            install_bin_1 = root / "install-bin-1"
+            first_result, _ = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata,
+                archive_path=archive,
+                checksum_path=checksum,
+                force_macos=True,
+                shell="/usr/bin/fish",
+                extra_env={"CODEX_INSTALL_DIR": str(install_bin_1)},
+            )
+            self.assertEqual(first_result.returncode, 0, first_result.stderr)
+            fish_conf = root / "home" / ".config" / "fish" / "conf.d" / "codex.fish"
+            self.assertIn(str(install_bin_1), fish_conf.read_text())
+
+            install_bin_2 = root / "install-bin-2"
+            second_result, _ = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata,
+                archive_path=archive,
+                checksum_path=checksum,
+                force_macos=True,
+                shell="/usr/bin/fish",
+                extra_env={"CODEX_INSTALL_DIR": str(install_bin_2)},
+            )
+            self.assertEqual(second_result.returncode, 0, second_result.stderr)
+            self.assertIn("PATH was updated in", second_result.stdout)
+            content = fish_conf.read_text()
+            self.assertIn(str(install_bin_2), content)
+            self.assertNotIn(str(install_bin_1), content)
+            self.assertEqual(content.count("# >>> Codex installer >>>"), 1)
+
+    def test_fish_preserves_unrelated_user_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            conf_dir = root / "home" / ".config" / "fish" / "conf.d"
+            conf_dir.mkdir(parents=True)
+            fish_conf = conf_dir / "codex.fish"
+            custom_prefix = "# User comment before\nset -gx CUSTOM_CODEX_VAR 1\n"
+            custom_suffix = "# User comment after\nset -gx OTHER_VAR 2\n"
+            fish_conf.write_text(custom_prefix + custom_suffix)
+
+            archive, checksum, metadata = create_package_release(root)
+            result, _ = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata,
+                archive_path=archive,
+                checksum_path=checksum,
+                force_macos=True,
+                shell="/usr/bin/fish",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            content = fish_conf.read_text()
+            self.assertTrue(content.startswith(custom_prefix))
+            self.assertIn(custom_suffix.strip(), content)
+            self.assertIn("fish_add_path", content)
+
+    def test_fish_respects_custom_xdg_config_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            custom_xdg = root / "custom_config_dir"
+            archive, checksum, metadata = create_package_release(root)
+            result, _ = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata,
+                archive_path=archive,
+                checksum_path=checksum,
+                force_macos=True,
+                shell="/usr/bin/fish",
+                extra_env={"XDG_CONFIG_HOME": str(custom_xdg)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            custom_fish_conf = custom_xdg / "fish" / "conf.d" / "codex.fish"
+            default_fish_conf = root / "home" / ".config" / "fish" / "conf.d" / "codex.fish"
+            self.assertTrue(custom_fish_conf.exists())
+            self.assertFalse(default_fish_conf.exists())
+            self.assertIn(f"PATH was added to {custom_fish_conf}", result.stdout)
+
+    def test_bash_and_zsh_behavior_remains_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata = create_package_release(root)
+
+            # Test bash on Linux
+            bash_linux_root = root / "bash_linux"
+            bash_linux_root.mkdir()
+            archive_linux, checksum_linux, metadata_linux = create_package_release(
+                bash_linux_root, target="x86_64-unknown-linux-musl"
+            )
+            res_bash, _ = run_installer_in(
+                bash_linux_root,
+                VERSION,
+                metadata_json=metadata_linux,
+                archive_path=archive_linux,
+                checksum_path=checksum_linux,
+                force_macos=False,
+                shell="/bin/bash",
+            )
+            self.assertEqual(res_bash.returncode, 0, res_bash.stderr)
+            bashrc = bash_linux_root / "home" / ".bashrc"
+            self.assertTrue(bashrc.exists())
+            self.assertIn("export PATH=", bashrc.read_text())
+            self.assertNotIn("fish_add_path", bashrc.read_text())
+            self.assertIn("Current terminal: export PATH=", res_bash.stdout)
+            self.assertFalse(
+                (bash_linux_root / "home" / ".config" / "fish" / "conf.d" / "codex.fish").exists()
+            )
+
+            # Test zsh on macOS
+            zsh_macos_root = root / "zsh_macos"
+            zsh_macos_root.mkdir()
+            archive_mac, checksum_mac, metadata_mac = create_package_release(
+                zsh_macos_root, target="aarch64-apple-darwin"
+            )
+            res_zsh, _ = run_installer_in(
+                zsh_macos_root,
+                VERSION,
+                metadata_json=metadata_mac,
+                archive_path=archive_mac,
+                checksum_path=checksum_mac,
+                force_macos=True,
+                shell="/bin/zsh",
+            )
+            self.assertEqual(res_zsh.returncode, 0, res_zsh.stderr)
+            zprofile = zsh_macos_root / "home" / ".zprofile"
+            self.assertTrue(zprofile.exists())
+            self.assertIn("export PATH=", zprofile.read_text())
+            self.assertNotIn("fish_add_path", zprofile.read_text())
+            self.assertIn("Current terminal: export PATH=", res_zsh.stdout)
+            self.assertFalse(
+                (zsh_macos_root / "home" / ".config" / "fish" / "conf.d" / "codex.fish").exists()
+            )
+
+
+def find_fish_binary() -> str | None:
+    return os.environ.get("CODEX_TEST_FISH_BIN") or shutil.which("fish")
+
 
 def run_installer(
     release: str,
@@ -1032,6 +1313,8 @@ def run_installer_in(
     fail_ps: bool = False,
     daemon_only: bool = False,
     manual_update: bool = False,
+    shell: str = "/bin/sh",
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bin_dir = root / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -1188,9 +1471,11 @@ def run_installer_in(
             "CODEX_TEST_REQUEST_LOG": str(request_log),
             "HOME": str(home),
             "PATH": f"{bin_dir}:/usr/bin:/bin",
-            "SHELL": "/bin/sh",
+            "SHELL": shell,
         }
     )
+    if extra_env:
+        env.update(extra_env)
     env["CODEX_INSTALL_IF_CURRENT"] = "1" if manual_update else "0"
     if update_guard_from_release is None:
         env.pop("CODEX_INSTALL_IF_LATEST", None)
